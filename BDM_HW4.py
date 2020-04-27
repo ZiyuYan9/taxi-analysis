@@ -60,5 +60,6 @@ def toCSV(_, records):
 
 if __name__=='__main__':
     sc = SparkContext()
-    sc.textFile(sys.argv[1])     .mapPartitionsWithIndex(processTrips)     .reduceByKey(lambda x,y: x+y)     .map(lambda x: (x[0][0],x[0][1],x[1]))     .sortBy(lambda x: -x[2])     .map(lambda x: (x[0],(x[1],x[2])))     .reduceByKey(lambda x,y: x+y)     .sortByKey()     .map(lambda x: (x[0],x[1][0],x[1][1],x[1][2],x[1][3],x[1][4],x[1][5]))     .mapPartitionsWithIndex(toCSV)     .saveAsTextFile(sys.argv[2])
+    result = sc.textFile(sys.argv[1])     .mapPartitionsWithIndex(processTrips)     .reduceByKey(lambda x,y: x+y)     .map(lambda x: (x[0][0],x[0][1],x[1]))     .sortBy(lambda x: -x[2])     .map(lambda x: (x[0],(x[1],x[2])))     .reduceByKey(lambda x,y: x+y)     .sortByKey()     .map(lambda x: (x[0],x[1][0],x[1][1],x[1][2],x[1][3],x[1][4],x[1][5]))     .mapPartitionsWithIndex(toCSV)     .collect()
+    print(result)
 

@@ -104,13 +104,11 @@ if __name__ == "__main__":
     
     sc = SparkContext()
     
-    boroughs_geojson = 'boroughs.geojson'
-    neighborhoods_geojson = 'neighborhoods.geojson'
     input_file = sys.argv[1]
     output = sys.argv[2]
     
-    boroughs = gpd.read_file(boroughs_geojson).to_crs(fiona.crs.from_epsg(2263))
-    neighborhoods = gpd.read_file(neighborhoods_geojson).to_crs(fiona.crs.from_epsg(2263))
+    boroughs = gpd.read_file('boroughs.geojson').to_crs(fiona.crs.from_epsg(2263))
+    neighborhoods = gpd.read_file('neighborhoods.geojson').to_crs(fiona.crs.from_epsg(2263))
     
     borough_list = list(boroughs['boro_name'])
     neighborhood_list = list(neighborhoods['neighborhood'])

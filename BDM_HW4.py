@@ -1,67 +1,128 @@
-import csv
-import itertools
-import sys
 from pyspark import SparkContext
+import csv
+import geopandas as gpd
+import fiona
+import fiona.crs
+import shapely
+import sys
 
-def createIndex(shapefile):
+
+def createIndex(geojson):
+    '''
+    This function takes in a shapefile path, and return:
+    (1) index: an R-Tree based on the geometry data in the file
+    (2) zones: the original data of the shapefile
+    
+    Note that the ID used in the R-tree 'index' is the same as
+    the order of the object in zones.
+    '''
     import rtree
     import fiona.crs
     import geopandas as gpd
-    zones = gpd.read_file(shapefile).to_crs(fiona.crs.from_epsg(2263))
+    zones = gpd.read_file(geojson).to_crs(fiona.crs.from_epsg(2263))
     index = rtree.Rtree()
     for idx,geometry in enumerate(zones.geometry):
         index.insert(idx, geometry.bounds)
     return (index, zones)
 
-def findBoro(p, index, zones):
-    match = index.intersection((p.x, p.y, p.x, p.y))
-    for idx in match:
-        if zones.geometry[idx].contains(p):
-            return str(zones.borough[idx])
 
-def findZone(p, index, zones):
+def findNeighborhoods(p, index, zones):
+    '''
+    findZone returned the ID of the shape (stored in 'zones' with
+    'index') that contains the given point 'p'. If there's no match,
+    None will be returned.
+    '''
     match = index.intersection((p.x, p.y, p.x, p.y))
     for idx in match:
         if zones.geometry[idx].contains(p):
-            return str(zones.neighborhood[idx])
+            return idx
+    return None
+
+
+def findBoroughs(p, index, zones):
+    match = index.intersection((p.x, p.y, p.x, p.y))
+    for idx in match:
+        if zones.geometry[idx].contains(p):
+            return idx
+    return None
+
 
 def processTrips(pid, records):
     '''
-    Match each record with its starting borough and its destination zone
+    Our aggregation function that iterates through records in each
+    partition, checking whether we could find a zone that contain
+    the pickup location.
     '''
     import csv
     import pyproj
     import shapely.geometry as geom
     
-    # Create an R-tree index
-    proj = pyproj.Proj(init="epsg:2263", preserve_units=True)    
-    index, zones = createIndex('neighborhoods.geojson')    
-    
-    # Skip the header
     if pid==0:
         next(records)
     reader = csv.reader(records)
+    counts = {}
+    # Create an R-tree index
+    proj = pyproj.Proj(init="epsg:2263", preserve_units=True)    
+    
+    s_index, s_zones = createIndex('boroughs.geojson')    
+    e_index, e_zones = createIndex('neighborhoods.geojson')
     
     for row in reader:
-        if 'NULL' in row[5:7] or 'NULL' in row[9:11]: 
-            continue # ignore trips without locations
-        try:    
-            p1 = geom.Point(proj(float(row[5]), float(row[6]))) # get the pick up point to find the borough
-            p2 = geom.Point(proj(float(row[9]), float(row[10]))) # get the destination to find the zone
+        try:
+            s_p = geom.Point(proj(float(row[5]), float(row[6])))
+            e_p = geom.Point(proj(float(row[9]), float(row[10])))
+        
         except:
             continue
+        
+        borough = findBoroughs(s_p, s_index, s_zones)
+        neighborhood = findNeighborhoods(e_p, e_index, e_zones)
+        
+        if borough and neighborhood:
+            key = (borough, neighborhood)
+            counts[key] = counts.get(key, 0) + 1
+    return counts.items()
 
-        borough = findBoro(p1, index, zones)
-        zone = findZone(p2, index, zones)
-        if borough!=None and zone!=None:
-            yield (borough, zone), 1
 
-def toCSV(_, records):
-    for (boro, top1, num1, top2, num2, top3, num3) in records:
-        yield ','.join((boro, top1, str(num1), top2, str(num2), top3, str(num3)))
+def organize(records):
+    res = {}
+    for record in records:
+        if record[0] not in res:
+            res[record[0]] = []
+        res[record[0]].append(record[1])
+    return res.items()
 
-if __name__=='__main__':
+
+def mapper(line):
+    b, n = line[0], line[1]
+    n.sort(key=lambda x: x[1], reverse=True)
+    n = n[:3]
+    return b, n[0][0], n[0][1], n[1][0], n[1][1], n[2][0], n[2][1]
+
+
+if __name__ == "__main__":
+    
     sc = SparkContext()
-    output = sc.textFile(sys.argv[1])     .mapPartitionsWithIndex(processTrips)     .reduceByKey(lambda x,y: x+y)     .map(lambda x: (x[0][0],x[0][1],x[1]))     .sortBy(lambda x: -x[2])     .map(lambda x: (x[0],(x[1],x[2])))     .reduceByKey(lambda x,y: x+y)     .sortByKey()     .map(lambda x: (x[0],x[1][0],x[1][1],x[1][2],x[1][3],x[1][4],x[1][5]))     .mapPartitionsWithIndex(toCSV)     .collect()
-    print(output)
-
+    
+    boroughs_geojson = 'boroughs.geojson'
+    neighborhoods_geojson = 'neighborhoods.geojson'
+    input_file = sys.argv[1]
+    output = sys.argv[2]
+    
+    boroughs = gpd.read_file(boroughs_geojson).to_crs(fiona.crs.from_epsg(2263))
+    neighborhoods = gpd.read_file(neighborhoods_geojson).to_crs(fiona.crs.from_epsg(2263))
+    
+    borough_list = list(boroughs['boro_name'])
+    neighborhood_list = list(neighborhoods['neighborhood'])
+    
+    rdd = sc.textFile(input_file)
+    counts = rdd.filter(lambda row: len(row)>9) \
+                .mapPartitionsWithIndex(processTrips) \
+                .reduceByKey(lambda x,y: x+y) \
+                .map(lambda x: ((borough_list[x[0][0]]), (neighborhood_list[x[0][1]], x[1]))) \
+                .mapPartitions(organize) \
+                .reduceByKey(lambda x,y: x+y) \
+                .map(mapper) \
+                .sortByKey() \
+                .collect()
+    print(counts)
